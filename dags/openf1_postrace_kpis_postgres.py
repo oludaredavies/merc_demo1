@@ -8,12 +8,17 @@ with complex aggregations.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
+import psycopg2
 from airflow.decorators import dag, task
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 
+logger = logging.getLogger(__name__)
 TARGET_DRIVER_NUMBERS = [63, 12]
+SUPABASE_CONN_ID = "davies_supabase_connection"
 
 
 @dag(
@@ -32,120 +37,169 @@ TARGET_DRIVER_NUMBERS = [63, 12]
 def openf1_postrace_kpis_postgres():
     @task
     def compute_kpis_with_sql() -> None:
-        """Compute KPIs using a single SQL query instead of multiple API calls."""
-        from include.supabase_utils import fetch_supabase_dataframe
+        """Compute KPIs using a single SQL query and PostgreSQL connection."""
+        # Get PostgreSQL connection to Supabase
+        postgres_hook = PostgresHook(postgres_conn_id=SUPABASE_CONN_ID)
+        airflow_conn = postgres_hook.get_connection(SUPABASE_CONN_ID)
+        password = airflow_conn.password
 
-        # Get latest session key
-        latest_session_df = fetch_supabase_dataframe("""
-            SELECT MAX(session_key) as session_key
-            FROM laps
-        """)
+        conn_kwargs = {
+            "host": "aws-1-us-east-1.pooler.supabase.com",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "postgres.ouzwgivgsluiwzgclmpo",
+            "password": password,
+            "sslmode": "require",
+            "connect_timeout": 10,
+        }
 
-        if latest_session_df.empty or latest_session_df.iloc[0]["session_key"] is None:
-            print("No session data found")
-            return
+        with psycopg2.connect(**conn_kwargs) as conn:
+            with conn.cursor() as cursor:
+                # Get latest session key
+                cursor.execute("SELECT MAX(session_key) FROM laps")
+                result = cursor.fetchone()
 
-        session_key = int(latest_session_df.iloc[0]["session_key"])
-        print(f"Computing KPIs for session {session_key}")
+                if not result or result[0] is None:
+                    logger.info("No session data found")
+                    return
 
-        # Build driver filter for SQL
-        driver_filter = ",".join(str(d) for d in TARGET_DRIVER_NUMBERS)
+                session_key = result[0]
+                logger.info(f"Computing KPIs for session {session_key}")
 
-        # Single comprehensive SQL query to compute all KPIs
-        kpi_query = f"""
-            WITH lap_stats AS (
-                SELECT
-                    l.driver_number,
-                    COUNT(*) as total_laps,
-                    AVG(l.lap_duration) as avg_lap_time,
-                    MIN(l.lap_duration) as best_lap_time,
-                    STDDEV_POP(
-                        CASE WHEN l.is_pit_out_lap = false
-                        THEN l.lap_duration
-                        ELSE NULL END
-                    ) as lap_time_stddev
-                FROM laps l
-                WHERE l.session_key = {session_key}
-                  AND l.driver_number IN ({driver_filter})
-                  AND l.lap_duration IS NOT NULL
-                GROUP BY l.driver_number
-            ),
-            pit_stats AS (
-                SELECT
-                    p.driver_number,
-                    COUNT(*) as num_pit_stops,
-                    AVG(p.pit_duration) as avg_pit_duration
-                FROM pit_stops p
-                WHERE p.session_key = {session_key}
-                  AND p.driver_number IN ({driver_filter})
-                  AND p.pit_duration IS NOT NULL
-                GROUP BY p.driver_number
-            ),
-            stint_stats AS (
-                SELECT
-                    s.driver_number,
-                    STRING_AGG(DISTINCT UPPER(s.compound), ',' ORDER BY UPPER(s.compound))
-                        as tyre_compounds_used
-                FROM stints s
-                WHERE s.session_key = {session_key}
-                  AND s.driver_number IN ({driver_filter})
-                  AND s.compound IS NOT NULL
-                GROUP BY s.driver_number
-            ),
-            result_stats AS (
-                SELECT
-                    r.driver_number,
-                    r.position as finishing_position,
-                    r.points
-                FROM session_results r
-                WHERE r.session_key = {session_key}
-                  AND r.driver_number IN ({driver_filter})
-            )
-            SELECT
-                {session_key} as session_key,
-                l.driver_number,
-                l.total_laps,
-                l.avg_lap_time,
-                l.best_lap_time,
-                l.lap_time_stddev,
-                COALESCE(p.num_pit_stops, 0) as num_pit_stops,
-                p.avg_pit_duration,
-                s.tyre_compounds_used,
-                r.finishing_position,
-                r.points,
-                NOW() as ingested_at
-            FROM lap_stats l
-            LEFT JOIN pit_stats p ON l.driver_number = p.driver_number
-            LEFT JOIN stint_stats s ON l.driver_number = s.driver_number
-            LEFT JOIN result_stats r ON l.driver_number = r.driver_number
-            ORDER BY l.driver_number
-        """
+                # Build driver filter for SQL
+                driver_filter = ",".join(str(d) for d in TARGET_DRIVER_NUMBERS)
 
-        # Execute the query
-        kpis_df = fetch_supabase_dataframe(kpi_query)
+                # Single comprehensive SQL query to compute all KPIs
+                kpi_query = f"""
+                    WITH lap_stats AS (
+                        SELECT
+                            l.driver_number,
+                            COUNT(*) as total_laps,
+                            AVG(l.lap_duration) as avg_lap_time,
+                            MIN(l.lap_duration) as best_lap_time,
+                            STDDEV_POP(
+                                CASE WHEN l.is_pit_out_lap = false
+                                THEN l.lap_duration
+                                ELSE NULL END
+                            ) as lap_time_stddev
+                        FROM laps l
+                        WHERE l.session_key = {session_key}
+                          AND l.driver_number IN ({driver_filter})
+                          AND l.lap_duration IS NOT NULL
+                        GROUP BY l.driver_number
+                    ),
+                    pit_stats AS (
+                        SELECT
+                            p.driver_number,
+                            COUNT(*) as num_pit_stops,
+                            AVG(p.pit_duration) as avg_pit_duration
+                        FROM pit_stops p
+                        WHERE p.session_key = {session_key}
+                          AND p.driver_number IN ({driver_filter})
+                          AND p.pit_duration IS NOT NULL
+                        GROUP BY p.driver_number
+                    ),
+                    stint_stats AS (
+                        SELECT
+                            s.driver_number,
+                            STRING_AGG(DISTINCT UPPER(s.compound), ',' ORDER BY UPPER(s.compound))
+                                as tyre_compounds_used
+                        FROM stints s
+                        WHERE s.session_key = {session_key}
+                          AND s.driver_number IN ({driver_filter})
+                          AND s.compound IS NOT NULL
+                        GROUP BY s.driver_number
+                    ),
+                    result_stats AS (
+                        SELECT
+                            r.driver_number,
+                            r.position as finishing_position,
+                            r.points
+                        FROM session_results r
+                        WHERE r.session_key = {session_key}
+                          AND r.driver_number IN ({driver_filter})
+                    )
+                    SELECT
+                        l.driver_number,
+                        l.total_laps,
+                        l.avg_lap_time,
+                        l.best_lap_time,
+                        l.lap_time_stddev,
+                        COALESCE(p.num_pit_stops, 0) as num_pit_stops,
+                        p.avg_pit_duration,
+                        s.tyre_compounds_used,
+                        r.finishing_position,
+                        r.points
+                    FROM lap_stats l
+                    LEFT JOIN pit_stats p ON l.driver_number = p.driver_number
+                    LEFT JOIN stint_stats s ON l.driver_number = s.driver_number
+                    LEFT JOIN result_stats r ON l.driver_number = r.driver_number
+                    ORDER BY l.driver_number
+                """
 
-        if kpis_df.empty:
-            print("No KPI data computed")
-            return
+                # Execute the query
+                cursor.execute(kpi_query)
+                kpi_records = cursor.fetchall()
 
-        print(f"\nComputed KPIs for {len(kpis_df)} drivers:")
-        print(kpis_df.to_string(index=False))
+                if not kpi_records:
+                    logger.info("No KPI data computed")
+                    return
 
-        # Convert to records for upsert
-        kpi_records = kpis_df.to_dict(orient="records")
+                logger.info(f"Computed KPIs for {len(kpi_records)} drivers")
 
-        # Upsert to postrace_driver_kpis table using PostgreSQL
-        from include.supabase_utils import get_supabase_client
+                # Display computed KPIs
+                for record in kpi_records:
+                    logger.info(
+                        f"Driver {record[0]}: {record[1]} laps, avg: {record[2]:.3f}s, best: {record[3]:.3f}s"
+                    )
 
-        sb = get_supabase_client("davies_supabase_connection_http")
+                # Upsert KPI records to postrace_driver_kpis table
+                insert_sql = """
+                    INSERT INTO postrace_driver_kpis (
+                        session_key, driver_number, total_laps, avg_lap_time, best_lap_time,
+                        lap_time_stddev, num_pit_stops, avg_pit_duration, tyre_compounds_used,
+                        finishing_position, points, ingested_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (session_key, driver_number)
+                    DO UPDATE SET
+                        total_laps = EXCLUDED.total_laps,
+                        avg_lap_time = EXCLUDED.avg_lap_time,
+                        best_lap_time = EXCLUDED.best_lap_time,
+                        lap_time_stddev = EXCLUDED.lap_time_stddev,
+                        num_pit_stops = EXCLUDED.num_pit_stops,
+                        avg_pit_duration = EXCLUDED.avg_pit_duration,
+                        tyre_compounds_used = EXCLUDED.tyre_compounds_used,
+                        finishing_position = EXCLUDED.finishing_position,
+                        points = EXCLUDED.points,
+                        ingested_at = EXCLUDED.ingested_at
+                """
 
-        result = (
-            sb.table("postrace_driver_kpis")
-            .upsert(kpi_records, on_conflict="session_key,driver_number")
-            .execute()
-        )
+                ingested_at = datetime.utcnow().isoformat() + "Z"
 
-        print(f"\nSuccessfully upserted {len(result.data)} KPI records")
+                for record in kpi_records:
+                    # record format: (driver_number, total_laps, avg_lap_time, best_lap_time,
+                    #                 lap_time_stddev, num_pit_stops, avg_pit_duration,
+                    #                 tyre_compounds_used, finishing_position, points)
+                    cursor.execute(
+                        insert_sql,
+                        (
+                            session_key,
+                            record[0],  # driver_number
+                            record[1],  # total_laps
+                            record[2],  # avg_lap_time
+                            record[3],  # best_lap_time
+                            record[4],  # lap_time_stddev
+                            record[5],  # num_pit_stops
+                            record[6],  # avg_pit_duration
+                            record[7],  # tyre_compounds_used
+                            record[8],  # finishing_position
+                            record[9],  # points
+                            ingested_at,
+                        ),
+                    )
+
+                conn.commit()
+                logger.info(f"Successfully upserted {len(kpi_records)} KPI records")
 
     compute_kpis_with_sql()
 
