@@ -26,7 +26,7 @@ SUPABASE_CONN_ID = "davies_supabase_connection"
         "retries": 0,
     },
     tags=["openf1", "supabase"],
-)
+)§
 def openf1_postrace_kpis_supabase():
     @task
     def compute_and_store_kpis() -> None:
