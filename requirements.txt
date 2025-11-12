@@ -1,0 +1,11 @@
+# Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
+supabase>=2.4.0
+httpx>=0.27.0
+requests>=2.32.3
+python-dateutil>=2.9.0.post0
+tenacity>=9.0.0
+
+# PostgreSQL direct connection support
+psycopg2-binary>=2.9.9
+pandas>=2.0.0
+apache-airflow-providers-postgres>=5.10.2
