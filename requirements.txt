@@ -10,5 +10,5 @@ psycopg2-binary>=2.9.9
 pandas>=2.0.0
 apache-airflow-providers-postgres>=5.10.2
 
-#cosmos
-cosmos
+# Cosmos
+astronomer-cosmos
