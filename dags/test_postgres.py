@@ -11,7 +11,7 @@ Uses connection: davies_supabase_connection
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime 
 
 import pandas as pd
 from airflow.decorators import dag, task
